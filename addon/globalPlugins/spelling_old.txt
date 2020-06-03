@@ -1,0 +1,326 @@
+﻿# -*- coding:utf-8 -*-
+# Copyright (C) 2020 Rui Fontes <rui.fontes@tiflotecnia.com> with code from palavras-master from Python.pro.br
+# This file is covered by the GNU General Public License.
+# See the file COPYING for more details.
+
+import globalPluginHandler
+import os
+import api
+import textInfos
+from textInfos import offsets
+import collections
+import string
+import wx
+from wx.lib.expando import ExpandoTextCtrl
+import gui
+from gui import guiHelper
+from ui import message
+from time import sleep
+import globalVars
+from keyboardHandler import KeyboardInputGesture
+import codecs
+import re
+from globalCommands import SCRCAT_CONFIG
+import addonHandler
+addonHandler.initTranslation()
+
+filepath = os.path.join (os.path.dirname(__file__), "palavras_pt_PT.txt")
+#filepath = os.path.join (os.path.dirname(__file__), "palavras_br.txt")
+#filepath = os.path.join (os.path.dirname(__file__), "words_alpha.txt")
+allText = ""
+wordsList = []
+vocabulary = []
+misspelled = ""
+msParagraph = ""
+x = 0
+candidates = []
+
+def vocabularyCreation():
+	# Creating the global and personal vocabulary.
+	global vocabulary
+	with open(filepath, "r", encoding = "UTF-8") as f:
+		vocabulary = f.read().split()
+	# Creating personal dictionary if exists, or ignore if not exisxts.
+	if os.path.exists (os.path.join (os.path.dirname(__file__), "personal.txt")) == False:
+		checkVocabulary()
+		return
+	else:
+		with open (os.path.join (os.path.dirname(__file__), "personal.txt"), "r", encoding = "UTF-8") as g:
+			pVocabulary = g.read().split()
+		# Join personal dictionary to global
+		vocabulary += pVocabulary
+	checkVocabulary()
+
+def checkVocabulary():
+	# Check wich words are not present in the dictionary
+	global wordsList, misspelled, vocabulary
+	for x in range(len(wordsList)):
+		# Removing words with numbers...
+		if wordsList[x].isdigit() == True:
+			pass
+		elif any(i.isdigit() for i in wordsList[x]) == True:
+			pass
+		# Word present in dictionary, so skip it
+		elif wordsList[x] in vocabulary:
+			pass
+		# Possible misspelled word since it is not part of dictionary...
+		else:
+			# Check if exists in lowercase
+			if wordsList[x].lower() in vocabulary:
+				pass
+			else:
+				misspelled = wordsList[x]
+				break
+	# No possible misspelled words, and reached the end of list... So, inform that spell checking is finished...
+	if misspelled == "":
+		gui.messageBox (_("Spellcheck finished!"), _("Spell checker"))
+	else:
+		getSentence()
+
+def getSentence():
+	global misspelled, msParagraph, x, allText
+	msParagraph = ""
+	indexIn = 0
+	indexEnd = 0
+ # Find position of misspelled in original string
+	indexMisspelled = allText.find(misspelled, x, -1)
+	x = indexMisspelled+1
+	# Find position of sentence beginning
+	index = []
+	index.append(allText.rfind(".", 0, indexMisspelled))
+	index.append(allText.rfind(":", 0, indexMisspelled))
+	index.append(allText.rfind(";", 0, indexMisspelled))
+	index.append(allText.rfind("?", 0, indexMisspelled))
+	index.append(allText.rfind("!", 0, indexMisspelled))
+	index.append(allText.rfind("\n", 0, indexMisspelled))
+	index.append(allText.rfind("\r", 0, indexMisspelled))
+	if max(index) == -1:
+		indexIn == 0
+	else:
+		indexIn = max(index)
+	# Find of sentence end
+	index = []
+	index.append(allText.find(".", indexMisspelled, -1))
+	index.append(allText.find(":", indexMisspelled, -1))
+	index.append(allText.find(";", indexMisspelled, -1))
+	index.append(allText.find("?", indexMisspelled, -1))
+	index.append(allText.find("!", indexMisspelled, -1))
+	index.append(allText.find("\r", indexMisspelled, -1))
+	index.append(allText.find("\n", indexMisspelled, -1))
+	index.append(allText.find("\n", indexMisspelled, -1))
+	index.append(allText.find("\r", indexMisspelled, -1))
+	if min(index) == -1:
+		index.remove(-1)
+	indexEnd = min(index)
+	# Define sentence
+	if indexIn != 0:
+		indexIn +=  1
+	msParagraph = allText[indexIn:indexEnd+1]
+	message(str(msParagraph))
+	candidatesList()
+
+def candidatesList():
+	# Code of this function is from palavras-master from Python.pro.br
+	# Returns all possibilities of words (known and unknown)
+	# with up to two mistakes.
+	# :param misspelled Set of words.
+	global misspelled
+	letters = 'aáàãâbcçdeéêfghiíjklmnoóõôpqrstuúvwxyz'
+	deletes = [misspelled[:i]+misspelled[i+1:] for i in range(len(misspelled))]
+	splits = [(misspelled[:i], misspelled[i:]) for i in range(len(misspelled) + 1)]
+	switchs = [L+R[1]+R[0]+R[2:] for L, R in splits if len(R)>1]
+	replaces = [L + letter + R[1:] for L, R in splits for letter in letters]
+	adds = [L + letter + R for L, R in splits for letter in letters]
+	unigrams = list(set(deletes + switchs + replaces + adds))
+	global candidates, vocabulary
+	setUnigrams = set(word for word in unigrams)
+	setVocabulary = set(word for word in vocabulary)
+	candidates = list(setUnigrams.intersection(setVocabulary))
+	gui.mainFrame._popupSettingsDialog(spellCheckerDialog)
+
+class GlobalPlugin(globalPluginHandler.GlobalPlugin):
+	def __init__(self):
+		super(globalPluginHandler.GlobalPlugin, self).__init__()
+
+	__gestures={
+		"kb:Control+f7": "spellCheck",
+	}
+
+	def script_spellCheck(self, gesture):
+		# For translators: Message announcing the start of works...
+		message(_("Processing... Please wait... This operation can takes some seconds..."))
+
+		# Create the list of words present in the text
+		obj = api.getFocusObject()
+		treeInterceptor = obj.treeInterceptor
+		if hasattr (treeInterceptor, 'TextInfo') and not treeInterceptor.passThrough:
+			obj = treeInterceptor
+		try:
+			info = obj.makeTextInfo (textInfos.POSITION_ALL)
+		except (RuntimeError, NotImplementedError):
+			info = None
+		if not info or info.isCollapsed:
+			message (_("Error"))
+		else:
+			# save allText as the original string...
+			global allText
+			allText = info.text
+			allText1 = str(allText)
+
+			# Removing all punctuations except hyphen, "-", and apostroph, "'", between words.
+			toRemove = string.punctuation.replace("\'", "").replace("-", "").replace("@", "").replace(" ", "")+"“"+"”"+"—"+"…"+"«"+"»"
+			for z in range(len(toRemove)):
+				X = toRemove[z]
+				allText1 = allText1.translate(str.maketrans(X, " "))
+				allText1 = allText1.replace("- ", "")
+
+			# Now, create the list...
+			global wordsList
+			wordsList = allText1.split()
+
+		vocabularyCreation()
+
+class spellCheckerDialog(wx.Dialog):
+	# A dialog  to show spellchecker
+	_instance = None
+	def __new__(cls, *args, **kwargs):
+		if spellCheckerDialog._instance is None:
+			return wx.Dialog.__new__(cls)
+		return spellCheckerDialog._instance
+
+	def __init__ (self, parent):
+		spellCheckerDialog._instance = self
+		# Translators: Title of the dialog.
+		super (spellCheckerDialog, self).__init__(parent, wx.ID_ANY, title = _("Spell checker"))
+		title = _("Spell checker")
+		self.title = title
+		self.makeSettings()
+
+	def makeSettings(self):
+		mainSizer = wx.BoxSizer(wx.VERTICAL)
+		tasksSizer = wx.BoxSizer(wx.VERTICAL)
+		# Translators: A label for the the Not in dictionary field
+		NotInDictionLabel = _("&Not in dictionary")
+		notDictBox = wx.StaticBox(self, label = NotInDictionLabel)
+		self.misspelledCtrl = ExpandoTextCtrl(self, size = (250, -1), value = misspelled, style=wx.TE_READONLY)
+
+		# Translators: A label for the the Not in dictionary field
+		NotInDiction1Label = _("in the following paragraph:")
+		notDict1Box = wx.StaticBox(self, label = NotInDiction1Label)
+		self.msParagraphCtrl = ExpandoTextCtrl(self, size = (250, -1), value = msParagraph, style=wx.TE_READONLY)
+		# Translators: The label for the list of suggestions.
+		sHelper = guiHelper.BoxSizerHelper(self, orientation=wx.VERTICAL)
+		entriesLabelText=_("&Suggestions")
+		self.dictList = sHelper.addLabeledControl(entriesLabelText, wx.ListBox, id = wx.ID_ANY, choices = candidates, style = wx.LB_SINGLE, size = (700,580))
+		#self.editingIndex=-1
+
+		# Create buttons.
+		# Buttons are in a vertical row
+		buttonsSizer = wx.BoxSizer(wx.VERTICAL)
+
+		addButtonID = wx.Window.NewControlId()
+		# Translators: Label of button to add the misspelled word to the personal dictionary.
+		self.addButton = wx.Button(self, addButtonID, _('&Add'))
+		buttonsSizer.Add (self.addButton)
+
+		ignoreButtonID = wx.Window.NewControlId()
+		# Translators: Label of button to ignore the misspelled word once.
+		self.ignoreButton = wx.Button (self, ignoreButtonID, _('Ignore &once'))
+		buttonsSizer.Add(self.ignoreButton)
+
+		ignoreAllButtonID = wx.Window.NewControlId()
+		# Translators: Label of button to ignore all cases of the misspelled word.
+		self.ignoreAllButton = wx.Button(self, ignoreAllButtonID, _('&Ignore all'))
+		buttonsSizer.Add (self.ignoreAllButton)
+
+		substitutButtonID = wx.Window.NewControlId()
+		# Translators: Label of button to replace the misspelled word by the suggestion.
+		self.substitutButton = wx.Button(self, substitutButtonID, _('&Substitut'))
+		buttonsSizer.Add (self.substitutButton)
+
+		editButtonID = wx.Window.NewControlId()
+		# Translators: Label of button to allow edition of the text.
+		self.editButton = wx.Button (self, editButtonID, _('&Edit'))
+		buttonsSizer.Add (self.editButton)
+
+		cancelButtonID = wx.Window.NewControlId()
+		# Translators: Button Label that closes the add-on.
+		self.cancelButton = wx.Button(self, cancelButtonID, _('&Close'))
+		buttonsSizer.Add(self.cancelButton)
+
+		tasksSizer.Add(buttonsSizer)
+		mainSizer.Add(tasksSizer)
+
+		# Bind the buttons.
+		self.Bind(wx.EVT_BUTTON, self.onAdd, id = addButtonID)
+		self.Bind (wx.EVT_BUTTON, self.onIgnoreOnce, id = ignoreButtonID )
+		self.Bind(wx.EVT_BUTTON, self.onIgnoreAll, id = ignoreAllButtonID)
+		self.Bind(wx.EVT_BUTTON, self.onSubstitut, id = substitutButtonID)
+		self.Bind(wx.EVT_BUTTON, self.onEdit, id = editButtonID)
+		self.cancelButton.Bind(wx.EVT_BUTTON, lambda evt: self.Destroy())
+		self.SetEscapeId(wx.ID_CLOSE)
+		self.dictList.Bind(wx.EVT_KEY_DOWN, self.onKeyPress)
+		self.misspelledCtrl.Bind(wx.EVT_KEY_DOWN, self.onKeyPress)
+		self.msParagraphCtrl.Bind(wx.EVT_KEY_DOWN, self.onKeyPress)
+
+		mainSizer.Fit(self)
+		self.SetSizer(mainSizer)
+
+	def onCancel(self,evt):
+		self.Close()
+
+	def onAdd(self,evt):
+		global vocabulary, misspelled
+		with open (os.path.join (os.path.dirname(__file__), "personal.txt"), "a", encoding = "UTF-8") as g:
+			g.write(misspelled +"\n")
+			g.close()
+		vocabulary.append(misspelled)
+		misspelled = ""
+		self.Close()
+		self.Destroy()
+		checkVocabulary()
+
+	def onIgnoreOnce(self,evt):
+		global wordsList, misspelled
+		wordsList.remove(misspelled)
+		misspelled = ""
+		self.Close()
+		self.Destroy()
+		checkVocabulary()
+
+	def onIgnoreAll(self,evt):
+		global vocabulary, misspelled
+		vocabulary.append(misspelled)
+		misspelled = ""
+		self.Close()
+		self.Destroy()
+		checkVocabulary()
+
+	def onSubstitut(self,evt):
+		index=self.dictList.GetFirstSelected()
+		while index>=0:
+			self.dictList.DeleteItem(index)
+			del self.tempSpeechDict[index]
+			index=self.dictList.GetNextSelected(index)
+		self.dictList.SetFocus()
+
+	def onEdit(self,evt):
+		if self.dictList.GetSelectedItemCount()!=1:
+			return
+		editIndex=self.dictList.GetFirstSelected()
+		if editIndex < 0:
+			return
+
+	def onKeyPress(self, evt):
+		# Sets enter key  to replace the misspelled word by the suggestion and Escape to close.
+		evt.Skip()
+		keycode = evt.GetKeyCode()
+		if keycode == wx.WXK_RETURN and self.listBox.GetItemCount():
+			self.onPaste(evt)
+		elif keycode == wx.WXK_ESCAPE:
+			self.Destroy()
+
+	def Destroy(self):
+		spellCheckerDialog._instance = None
+		super (spellCheckerDialog, self).Destroy()
+
